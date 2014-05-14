@@ -33,3 +33,5 @@ References
 L. Zhong & J. Kwok, Efficient Sparse Modeling With Automatic Feature Grouping, IEEE Transactions on Neural Networks and Learning Systems. 2012. http://www.cse.ust.hk/~jamesk/papers/tnnls12b.pdf
 
 J. Duchi, E. Hazan, & Y. Singer, Adaptive Subgradient Methods for Online Learning and Stochastic Optimization, Journal of Machine Learning Research, 2011. http://www.cs.berkeley.edu/~jduchi/projects/DuchiHaSi11.pdf
+
+X. Zeng & M. Figueiredo, Solving OSCAR regularization problems by proximal splitting algorithms, Arxiv, 2013. http://arxiv.org/pdf/1309.6301.pdf (This implementation uses the exact grouping proximity operator, not Zeng's approximate proximity operator)
