@@ -41,10 +41,16 @@ class AdaGradOscarOptimizer {
 
   double EffectiveLearningRate(const size_t i) const {
     double sqrt_G = sqrt(_G.at(i));
-    if (sqrt_G > 0.0)
-      return _nonadapted_learning_rate + _init_learning_rate / sqrt_G;
-    else
-      return _nonadapted_learning_rate;
+    assert(sqrt_G >= 0.0);
+
+    double result;
+    if (sqrt_G != 0.0) {
+      result = _nonadapted_learning_rate + _init_learning_rate / sqrt_G;
+    } else {
+      result = _nonadapted_learning_rate;
+    }
+    assert(std::isfinite(result));
+    return result;
   }
 
   // prepare inputs for OSCAR proximal step, according to the diagonal AdaGrad update strategy
@@ -54,6 +60,7 @@ class AdaGradOscarOptimizer {
     assert(pre_proximal_weights.size() == _N);
     for (size_t i = 0; i < _N; i++) {
       (*a)[i] = abs(pre_proximal_weights.at(i));
+      assert(std::isfinite(a->at(i)));
     }
   }
 
@@ -68,6 +75,7 @@ class AdaGradOscarOptimizer {
 	cerr << "Polarity_" << i << " " << polarity << "; " << pre_proximal_weights.at(i) << endl;
       }
       (*new_weights)[i] = polarity * z.at(i);
+      assert(std::isfinite(new_weights->at(i)));
     }
   }
 
@@ -75,6 +83,7 @@ class AdaGradOscarOptimizer {
   // used for determining an actual or hypothetical common parameter value within a group
   // i is the index of interest **in the sorted list** of a's
   double ComputeW(const size_t i) const {
+    assert(i < _N);
     //const double C1, // constant for L1 regularizer
     //const double C_inf, // constant for pairwise L_inf regularizer
     //const size_t N, // dimensionality / feature count
@@ -95,8 +104,10 @@ class AdaGradOscarOptimizer {
       assert(orig_idx < _N);
       assert(sorted_idx < _N);
       numerator += a.at(orig_idx) - ComputeW(sorted_idx);
+      assert(std::isfinite(numerator));
     }
     double v =  numerator / group.Size();
+    assert(std::isfinite(v));
     // clip: [v]_+
     return std::max(v, 0.0);
   }
@@ -155,7 +166,7 @@ class AdaGradOscarOptimizer {
       stack.pop();
       double common_weight = ComputeCommonValue(a, group);
       
-      if (_verbose) cerr << "Group " << iGroup++ << ": " << common_weight << endl;
+      if (_verbose) cerr << "Group_" << iGroup++ << ": " << common_weight << " Size: " << group.Size() << endl;
       for (size_t idx : group._orig_indices) {
 	(*z)[idx] = common_weight;
       }
@@ -164,6 +175,7 @@ class AdaGradOscarOptimizer {
     // sanity check for post condition that all z's should have been set
     for (size_t i = 0; i < _N; i++) {
       assert(z->at(i) != GUARD_VALUE);
+      assert(std::isfinite(z->at(i)));
     }
   }
 
@@ -226,10 +238,10 @@ class AdaGradOscarOptimizer {
      assert(_buffer_size >= -1);
      assert(_iterations >= 0);
 
-     _G.resize(_N);
-     _pre_proximal_weights.resize(_N);
-     _a.resize(_N);
-     _z.resize(_N);
+     _G.resize(_N, 0.0);
+     _pre_proximal_weights.resize(_N, 0.0);
+     _a.resize(_N, 0.0);
+     _z.resize(_N, 0.0);
    }
 
   // TODO: The gradient here could be a sparse vector
@@ -239,22 +251,23 @@ class AdaGradOscarOptimizer {
    assert(updated_weights->size() == _N);
    assert(gradient.size() == _N);
 
-   if (_verbose) cerr << "AdaGradOscar iteration " << _cur_iteration << endl;
    // TODO: We could use mini-batches here instead of full batch optimization
    
    // update the running sum of squared gradients used for the adaptive learning rate
-   if (_buffer_size > 0) {
+   if (_buffer_size != 0) {
      for (size_t j = 0; j < _N; j++) {
        _G[j] += gradient.at(j) * gradient.at(j);
+       assert(std::isfinite(_G.at(j)));
      }
    }
    
    // "forget" the oldest gradient for the adaptive learning rate iff the buffer is full
-   if (_buffer_size >= 0) {
+   if (_buffer_size > 0) {
      if ((int)_g_recent.size() == _buffer_size) {
        const vector<double>& oldest_g = _g_recent.front();
        for (size_t j = 0; j < _N; j++) {
 	 _G[j] -= oldest_g.at(j) * oldest_g.at(j);
+	 assert(std::isfinite(_G.at(j)));
        }      
        _g_recent.pop();
      }
@@ -265,42 +278,32 @@ class AdaGradOscarOptimizer {
      // TODO: We don't actually need to take the sqrt each time since
      // for sparse gradients, most elements of G don't actually change between time steps
      double effective_rate = EffectiveLearningRate(i);
-     if (_verbose) cerr << "EffectiveRate_" << i << ": " << effective_rate << " G: " << _G.at(i) << endl;
-     _pre_proximal_weights[i] = abs(_prev_weights.at(i) + effective_rate * gradient.at(i));
-   }
-   
-   if (_verbose) {
-     for (size_t i = 0; i < _N; i++) {
-       cerr << "ppw_" << i << " = " << _pre_proximal_weights.at(i) << endl;
-     }
+     assert(std::isfinite(_prev_weights.at(i)));
+     assert(std::isfinite(gradient.at(i)));
+     assert(std::isfinite(effective_rate));
+     _pre_proximal_weights[i] = _prev_weights.at(i) - effective_rate * gradient.at(i);
+     assert(std::isfinite(_pre_proximal_weights.at(i)));
    }
    
    OscarPrepareProximalInputs(_pre_proximal_weights, &_a);
-   
+   OscarProximalStep(_a, &_z);   
+   OscarWeightsFromProximalSolution(_z, _pre_proximal_weights, updated_weights);
+
    if (_verbose) {
+     cerr << "AdaGradOscar iteration " << _cur_iteration << endl;
      for (size_t i = 0; i < _N; i++) {
+       cerr << "PrevW_" << i << " = " << _prev_weights.at(i) << endl;
+       cerr << "gradient_" << i << " = " << gradient.at(i) << endl;
+       cerr << "EffectiveRate_" << i << ": " << EffectiveLearningRate(i) << " G=sum over g^2: " << _G.at(i) << endl;
+       cerr << "ppw_" << i << " = " << _pre_proximal_weights.at(i) << endl;
        cerr << "a_" << i << " = " << _a.at(i) << endl;
-     }
-   }
-   
-   OscarProximalStep(_a, &_z);
-   
-   if (_verbose) {
-     for (size_t i = 0; i < _N; i++) {
        cerr << "z_" << i << " = " << _z.at(i) << endl;
-     }
-   }
-   
-   OscarWeightsFromProximalSolution(_z, _pre_proximal_weights, &_prev_weights);
-   
-   if (_verbose) {
-     for (size_t i = 0; i < _N; i++) {
-       cerr << "NewW_" << i << " = " << _prev_weights.at(i) << endl;
+       cerr << "NewW_" << i << " = " << updated_weights->at(i) << endl;
      }
    }
    
    _cur_iteration++;
-   *updated_weights = _prev_weights; // element-wise copy
+   _prev_weights = *updated_weights;
  }
 
  bool HasConverged() const {
