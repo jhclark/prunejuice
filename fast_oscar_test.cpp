@@ -152,10 +152,10 @@ TEST(OptimizeTest, OptimizeTest) {
     cerr << "w_" << i << " = " << weights.at(i) << endl;
   }
 
-  EXPECT_NEAR(0.0, weights.at(0));
-  EXPECT_NEAR(1000.0, weights.at(1));
-  EXPECT_NEAR(10.0, weights.at(2));
-  EXPECT_NEAR(100.0, weights.at(3));
+  EXPECT_NEAR(0.0, weights.at(0), 0.1);
+  EXPECT_NEAR(1000.0, weights.at(1), 1.0);
+  EXPECT_NEAR(10.0, weights.at(2), 1.0);
+  EXPECT_NEAR(100.0, weights.at(3), 1.0);
 }
 
 // TODO: Design a function with a complex set of parameters to optimize
