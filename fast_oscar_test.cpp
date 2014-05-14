@@ -132,21 +132,30 @@ TEST(OptimizeTest, OptimizeTest) {
   // gradient magnitutes are huge for this regression problem due to large y's and squared loss
   // this will generally not be such a big problem for log loss classifiers
   double nonadapted_learning_rate = 1.0;
-  vector<double> init_weights;
-  init_weights.resize(NUM_FEATURES);
-  vector<double> learned_weights;
-  learned_weights.resize(NUM_FEATURES);
-
-  OscarAdaGradOptimize(C1, C_inf, init_learning_rate, nonadapted_learning_rate, BUFFER_SIZE, NUM_ITERATIONS, init_weights, &learned_weights,
-    [&](const vector<double>& W, vector<double>* G) {
-       loss_function(W, X, Y, perfect_feature_function, G);
-    });
-
-  for (size_t i = 0; i < learned_weights.size(); i++) {
-    cerr << "w_" << i << " = " << learned_weights.at(i) << endl;
+  vector<double> weights;
+  weights.resize(NUM_FEATURES);
+  
+  for (size_t i = 0; i < NUM_FEATURES; i++) {
+    weights[i] = 0.0;
   }
 
-  //EXPECT_EQ(2.0, sqrt(4.0));
+  vector<double> gradient;
+  gradient.resize(NUM_FEATURES);
+
+  AdaGradOscarOptimizer opt(C1, C_inf, init_learning_rate, nonadapted_learning_rate, BUFFER_SIZE, NUM_ITERATIONS, weights, true);
+  while (!opt.HasConverged()) {
+    double loss = loss_function(weights, X, Y, perfect_feature_function, &gradient);
+    opt.Optimize(loss, gradient, &weights);
+ }
+
+  for (size_t i = 0; i < weights.size(); i++) {
+    cerr << "w_" << i << " = " << weights.at(i) << endl;
+  }
+
+  EXPECT_NEAR(0.0, weights.at(0));
+  EXPECT_NEAR(1000.0, weights.at(1));
+  EXPECT_NEAR(10.0, weights.at(2));
+  EXPECT_NEAR(100.0, weights.at(3));
 }
 
 // TODO: Design a function with a complex set of parameters to optimize
