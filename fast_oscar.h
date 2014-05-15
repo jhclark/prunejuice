@@ -40,6 +40,7 @@ struct OscarGroup {
 class AdaGradOscarOptimizer {
 
   double EffectiveLearningRate(const size_t i) const {
+    assert(_G.at(i) >= 0.0);
     double sqrt_G = sqrt(_G.at(i));
     assert(sqrt_G >= 0.0);
 
@@ -228,7 +229,12 @@ class AdaGradOscarOptimizer {
      _N(init_weights.size()),
      _prev_weights(init_weights),
      _verbose(verbose),
+
      // initialize non-parameters
+     _G(_N, 0.0),
+     _a(_N, 0.0),
+     _z(_N, 0.0),
+     _pre_proximal_weights(_N, 0.0),
      _cur_iteration(0)
    {
      assert(_C1 >= 0.0);
@@ -237,18 +243,14 @@ class AdaGradOscarOptimizer {
      assert(_nonadapted_learning_rate >= 0.0);
      assert(_buffer_size >= -1);
      assert(_iterations >= 0);
-
-     _G.resize(_N, 0.0);
-     _pre_proximal_weights.resize(_N, 0.0);
-     _a.resize(_N, 0.0);
-     _z.resize(_N, 0.0);
    }
 
   // TODO: The gradient here could be a sparse vector
   // if using fairly small minibatch sizes for SGD
-  void Optimize(double /*cll*/, const vector<double>& gradient, vector<double>* updated_weights) {
+  void Optimize(double /*cll*/, const vector<double>& gradient_noreg, const vector<double>& gradient, vector<double>* updated_weights) {
    assert(updated_weights != NULL);
    assert(updated_weights->size() == _N);
+   assert(gradient_noreg.size() == _N);
    assert(gradient.size() == _N);
 
    // TODO: We could use mini-batches here instead of full batch optimization
@@ -258,6 +260,7 @@ class AdaGradOscarOptimizer {
      for (size_t j = 0; j < _N; j++) {
        _G[j] += gradient.at(j) * gradient.at(j);
        assert(std::isfinite(_G.at(j)));
+       assert(_G.at(j) >= 0.0);
      }
    }
    
@@ -266,8 +269,22 @@ class AdaGradOscarOptimizer {
      if ((int)_g_recent.size() == _buffer_size) {
        const vector<double>& oldest_g = _g_recent.front();
        for (size_t j = 0; j < _N; j++) {
-	 _G[j] -= oldest_g.at(j) * oldest_g.at(j);
+	 double oldest_g_sq = oldest_g.at(j) * oldest_g.at(j);
+	 double updated_value = _G.at(j) - oldest_g_sq;
 	 assert(std::isfinite(_G.at(j)));
+	 assert(std::isfinite(oldest_g_sq));
+	 assert(oldest_g_sq >= 0.0);
+	 assert(_G.at(j) >= 0.0);
+	 assert(updated_value >= -1e-6);
+
+	 if (_verbose) cerr << "G_" << j << ": " << _G.at(j) << " oldest_g_sq: " << oldest_g_sq << endl;
+	 if (updated_value < 0.0) // in case of floating point error
+	   _G[j] = 0.0;
+	 else
+	   _G[j] = updated_value;
+
+	 assert(std::isfinite(_G.at(j)));
+	 assert(_G.at(j) >= 0.0);
        }      
        _g_recent.pop();
      }
@@ -293,6 +310,7 @@ class AdaGradOscarOptimizer {
      cerr << "AdaGradOscar iteration " << _cur_iteration << endl;
      for (size_t i = 0; i < _N; i++) {
        cerr << "PrevW_" << i << " = " << _prev_weights.at(i) << endl;
+       cerr << "gradient_noreg_" << i << " = " << gradient_noreg.at(i) << endl;
        cerr << "gradient_" << i << " = " << gradient.at(i) << endl;
        cerr << "EffectiveRate_" << i << ": " << EffectiveLearningRate(i) << " G=sum over g^2: " << _G.at(i) << endl;
        cerr << "ppw_" << i << " = " << _pre_proximal_weights.at(i) << endl;
