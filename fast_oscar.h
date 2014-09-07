@@ -60,7 +60,11 @@ class AdaGradOscarOptimizer {
     assert(a->size() == _N);
     assert(pre_proximal_weights.size() == _N);
     for (size_t i = 0; i < _N; i++) {
-      (*a)[i] = abs(pre_proximal_weights.at(i));
+      if (_oscar_feats.at(i)) {
+	(*a)[i] = abs(pre_proximal_weights.at(i));
+      } else {
+	(*a)[i] = 0;
+      }
       assert(std::isfinite(a->at(i)));
     }
   }
@@ -75,7 +79,13 @@ class AdaGradOscarOptimizer {
       if (_verbose) {
 	cerr << "Polarity_" << i << " " << polarity << "; " << pre_proximal_weights.at(i) << endl;
       }
-      (*new_weights)[i] = polarity * z.at(i);
+      if (_oscar_feats.at(i)) {
+	(*new_weights)[i] = polarity * z.at(i);
+      } else {
+	// not an oscar feature -- just return the pre_proximal_weight, which
+	// is the result of applying a vanilla adagrad update
+	(*new_weights)[i] = pre_proximal_weights.at(i);
+      }
       assert(std::isfinite(new_weights->at(i)));
     }
   }
@@ -162,16 +172,27 @@ class AdaGradOscarOptimizer {
     }
     
     int iGroup = 0;
+    int num_active = 0;
+    int num_dof = 0;
     while (!stack.empty()) {
       const OscarGroup& group = *stack.top();
       stack.pop();
       double common_weight = ComputeCommonValue(a, group);
       
-      if (_verbose) cerr << "Group_" << iGroup++ << ": " << common_weight << " Size: " << group.Size() << endl;
+      if (_verbose) cerr << "Group_" << iGroup << ": " << common_weight << " Size: " << group.Size() << endl;
       for (size_t idx : group._orig_indices) {
 	(*z)[idx] = common_weight;
       }
+
+      if (common_weight != 0)
+      {
+        num_active += group.Size();
+        num_dof++;
+      }
+        
+      iGroup++;
     }
+    cerr << "FastOSCAR: Active features: " << num_active << " Degrees of freedom: " << num_dof << endl;
     
     // sanity check for post condition that all z's should have been set
     for (size_t i = 0; i < _N; i++) {
@@ -188,6 +209,7 @@ class AdaGradOscarOptimizer {
   const int _iterations;
   const size_t _N;
   vector<double> _prev_weights;
+  vector<bool> _oscar_feats;
   const bool _verbose;
 
   vector<double> _G;   // running sum (over iterations) of unnormalized gradient squares
@@ -219,6 +241,7 @@ class AdaGradOscarOptimizer {
     const int buffer_size, // number of historical gradients to consider when adapting the learning rate (use -1 for standard adagrad)
     const int iterations,
     const vector<double>& init_weights,
+    const vector<bool>& oscar_feats, // true for features that we should apply OSCAR to (others will remain untouched and will never be regularized away by oscar)
     const bool verbose)
    : _C1(C1),
      _C_inf(C_inf),
@@ -228,6 +251,7 @@ class AdaGradOscarOptimizer {
      _iterations(iterations),
      _N(init_weights.size()),
      _prev_weights(init_weights),
+     _oscar_feats(oscar_feats),
      _verbose(verbose),
 
      // initialize non-parameters
