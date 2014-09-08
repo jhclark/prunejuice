@@ -40,7 +40,9 @@ struct OscarGroup {
 class AdaGradOscarOptimizer {
 
   double EffectiveLearningRate(const size_t i) const {
+    assert(i < _N);
     assert(_G.at(i) >= 0.0);
+
     double sqrt_G = sqrt(_G.at(i));
     assert(sqrt_G >= 0.0);
 
@@ -57,30 +59,38 @@ class AdaGradOscarOptimizer {
   // prepare inputs for OSCAR proximal step, according to the diagonal AdaGrad update strategy
   void OscarPrepareProximalInputs(const vector<double>& pre_proximal_weights, vector<double>* a) const {
     assert(a != NULL);
-    assert(a->size() == _N);
+    assert(a->size() == _oscar_feat_count);
     assert(pre_proximal_weights.size() == _N);
-    for (size_t i = 0; i < _N; i++) {
+    assert(_oscar_feats.size() == _N);
+    assert(_oscar_feat_count <= _N);
+
+    size_t j = 0;
+    for (size_t i = 0; i < _N; ++i) {
       if (_oscar_feats.at(i)) {
-	(*a)[i] = abs(pre_proximal_weights.at(i));
-      } else {
-	(*a)[i] = 0;
+	(*a)[j] = abs(pre_proximal_weights.at(i));
+        assert(std::isfinite(a->at(j)));
+        ++j;
       }
-      assert(std::isfinite(a->at(i)));
     }
+    assert(j == a->size());
   }
 
   void OscarWeightsFromProximalSolution(const vector<double>& z, const vector<double>& pre_proximal_weights, vector<double>* new_weights) const {
-    assert (new_weights != NULL);
-    assert (z.size() == _N);
-    assert (z.size() == _N);
+    assert(new_weights != NULL);
+    assert(z.size() == _oscar_feat_count);
+    assert(pre_proximal_weights.size() == _N);
+    assert(new_weights->size() == _N);
+    assert(_oscar_feat_count <= _N);
     
-    for (size_t i = 0; i < _N; i++) {
+    size_t j = 0;
+    for (size_t i = 0; i < _N; ++i) {
       int polarity = sgn(pre_proximal_weights.at(i));
       if (_verbose) {
 	cerr << "Polarity_" << i << " " << polarity << "; " << pre_proximal_weights.at(i) << endl;
       }
       if (_oscar_feats.at(i)) {
-	(*new_weights)[i] = polarity * z.at(i);
+	(*new_weights)[i] = polarity * z.at(j);
+        ++j;
       } else {
 	// not an oscar feature -- just return the pre_proximal_weight, which
 	// is the result of applying a vanilla adagrad update
@@ -88,55 +98,109 @@ class AdaGradOscarOptimizer {
       }
       assert(std::isfinite(new_weights->at(i)));
     }
+    assert(j == z.size());
   }
 
-  // w: Measures contribution of regularizers
+  // w: Measures contribution of the L_inf regularizer
   // used for determining an actual or hypothetical common parameter value within a group
   // i is the index of interest **in the sorted list** of a's
-  double ComputeW(const size_t i) const {
-    assert(i < _N);
+  // (see text just below Eq 13)
+  double ComputeW_inf(const size_t i) const {
+    assert(i < _oscar_feat_count);
     //const double C1, // constant for L1 regularizer
     //const double C_inf, // constant for pairwise L_inf regularizer
     //const size_t N, // dimensionality / feature count
-    return _C1 + _C_inf * (_N - i);
+    return _C_inf * (_oscar_feat_count - i);
   }
 
   // compute the common value for a group or proposed group
   // equation (15)
-  double ComputeCommonValue(const vector<double>& a, const OscarGroup& group) const {
+  // optionally return individual contributions from regularizers and pre-proximal weight mass for debuggging
+  double ComputeCommonValue(const vector<double>& a,
+                            const OscarGroup& group,
+                            const bool include_Linf, // include Linf in returned value? this allows us to use it for grouping, but not for final weight value calculation
+                            double* a_contrib_out = nullptr,
+                            double* L1_contrib_out = nullptr,
+                            double* Linf_contrib_out = nullptr) const {
+    assert(a.size() == _oscar_feat_count);
+    assert(_oscar_feat_count <= _N);
+
     //const double C1, // constant for L1 regularizer
     //const double C_inf, // constant for pairwise L_inf regularizer
     //const size_t N, // dimensionality / feature count
 
-    double numerator = 0.0;
+    // separate the numerator into contributions from two categories:
+    // * a (the absolute value of the pre-proximal weight)
+    // * L1 (the contributions from the L1 regularizer)
+    // * Linf (the contributions from the Linf regularizer)
+    double numerator_a = 0.0;
+    double numerator_L1 = 0.0;
+    double numerator_Linf = 0.0;
     for (size_t k = 0; k < group._sorted_indices.size(); k++) {
       size_t orig_idx = group._orig_indices.at(k); // for accessing a's, etc.
       size_t sorted_idx = group._sorted_indices.at(k); // for determining impact under pairwise L_inf regularizer
-      assert(orig_idx < _N);
-      assert(sorted_idx < _N);
-      numerator += a.at(orig_idx) - ComputeW(sorted_idx);
-      assert(std::isfinite(numerator));
+      assert(orig_idx < _oscar_feat_count);
+      assert(sorted_idx < _oscar_feat_count);
+      numerator_a += a.at(orig_idx);
+      numerator_L1 -= _C1;
+      numerator_Linf -= ComputeW_inf(sorted_idx);
+      assert(std::isfinite(numerator_a));
+      assert(std::isfinite(numerator_L1));
+      assert(std::isfinite(numerator_Linf));
     }
-    double v =  numerator / group.Size();
-    assert(std::isfinite(v));
-    // clip: [v]_+
-    return std::max(v, 0.0);
+
+    double a_contrib = numerator_a / group.Size();
+    double L1_contrib = numerator_L1 / group.Size();
+    double Linf_contrib = numerator_Linf / group.Size();
+
+    // return debug values
+    if (a_contrib_out != nullptr) *a_contrib_out = a_contrib;
+    if (L1_contrib_out != nullptr) *L1_contrib_out = L1_contrib;
+    if (Linf_contrib_out != nullptr) *Linf_contrib_out = Linf_contrib;
+
+    //double v = a_contrib + L1_contrib + Linf_contrib;
+    //double result = std::max(v, 0.0;
+    //assert(std::isfinite(v));
+
+    // clip: [v]_+ (only include L1)
+    double clipped = std::max(a_contrib + L1_contrib, 0.0);
+    assert(std::isfinite(clipped));
+    if (clipped == 0.0) {
+      return 0.0;
+    } else {
+      // if we survived clipping via L1, allow Linf to change our ranking, but
+      // not clip us (this gives a non-octagonal regularizer, but that's okay)
+      if (include_Linf) {
+        double result = clipped + Linf_contrib;
+        assert(std::isfinite(result));
+        return result;
+      } else {
+        return clipped;
+      }
+    }
   }
 
   // NOTE: Gradient includes all smooth terms (typically just the loss only),
   // and not the non-smooth regularizers (e.g. L1 and OSCAR),
   // but it could include smooth structured regularizers, etc.
-  void OscarProximalStep(const vector<double>& a, vector<double>* z) const {
+  //
+  // the pre-proximal weights are used only for calculating the number of active features
+  // since there may be non-OSCAR features
+  void OscarProximalStep(const vector<double>& pre_proximal_weights,
+                         const vector<double>& a,
+			 vector<double>* z) const {
     assert(z != NULL);
-    assert(a.size() == _N);
-    assert(z->size() == _N);
+    assert(pre_proximal_weights.size() == _N);
+    assert(a.size() == _oscar_feat_count);
+    assert(z->size() == _oscar_feat_count);
+    assert(_oscar_feat_count <= _N);
 
     // alg2, line 2: initialize groups
     // home for all groups -- destroyed via scope
     // these groups will be mutated over the life of the function
     vector<OscarGroup> groups;
-    groups.resize(_N);
-    for (size_t i = 0; i < _N; i++) {
+    groups.resize(_oscar_feat_count);
+    for (size_t i = 0; i < _oscar_feat_count; i++) {
       groups[i]._orig_indices.push_back(i);
       groups[i]._init_value = a.at(i);
     }
@@ -145,7 +209,7 @@ class AdaGradOscarOptimizer {
     std::sort(groups.begin(), groups.end(),
 	      [](const OscarGroup& a, const OscarGroup& b) { return a._init_value > b._init_value; });
     
-    for (size_t i = 0; i < _N; i++) {
+    for (size_t i = 0; i < _oscar_feat_count; i++) {
       groups[i]._sorted_indices.push_back(i);
     }
 
@@ -154,12 +218,45 @@ class AdaGradOscarOptimizer {
     stack<OscarGroup*> stack;
     stack.push(&groups.at(0));
 
-    for (size_t i = 1; i < _N; i++) {
+    // in this outer loop, we determine how many groups we will have
+    for (size_t i = 1; i < _oscar_feat_count; i++) {
       OscarGroup& cur_group = groups.at(i);
-      while (!stack.empty() && ComputeCommonValue(a, cur_group) >= ComputeCommonValue(a, *stack.top())) {
-	OscarGroup& top = *stack.top();
-	cur_group.MergeWith(top);
-	stack.pop();
+      bool done_with_group = false;
+      while (!stack.empty() && !done_with_group) {
+        OscarGroup& next_group = *stack.top();
+        double cur_common_value = ComputeCommonValue(a, cur_group, true);
+        double next_common_value = ComputeCommonValue(a, next_group, true);
+        if (cur_common_value >= next_common_value) {
+          cur_group.MergeWith(next_group);
+          stack.pop(); // pop off next_group aka stack.top()
+          // merge and continue looking for merges with this group
+        } else {
+          // don't merge and stop looking for merges with this group
+          done_with_group = true;
+        }
+
+        if (_debug_proximal_step) {
+          double cur_a_contrib, cur_L1_contrib, cur_Linf_contrib;
+          double next_a_contrib, next_L1_contrib, next_Linf_contrib;
+          cur_common_value = ComputeCommonValue(a, cur_group, true, &cur_a_contrib, &cur_L1_contrib, &cur_Linf_contrib);
+          next_common_value = ComputeCommonValue(a, next_group, true, &next_a_contrib, &next_L1_contrib, &next_Linf_contrib);
+          double delta_Linf_contrib = next_Linf_contrib - cur_Linf_contrib;
+          cerr << "i=" << i << "; ";
+          if (cur_common_value >= next_common_value) {
+            cerr << "MERGED ";
+          } else {
+            cerr << "NOT MERGED ";
+          }
+          cerr << "cur_group " << cur_common_value << " (a=" << cur_a_contrib << "; L1=" << cur_L1_contrib << "; Linf=" << cur_Linf_contrib << ") "
+               << "with (>=?) next_group " << next_common_value << " (a=" << next_a_contrib << "; L1=" << next_L1_contrib << "; Linf=" << next_Linf_contrib << ") "
+               << " -- delta Linf_contrib: " << delta_Linf_contrib
+               << " -- group size: " << cur_group.Size();
+          if (done_with_group) {
+            cerr << " (DONE with group)" << endl;
+          } else {
+            cerr << " (CONTINUE with group)" << endl;
+          }
+        }
       }
       stack.push(&cur_group);
     }
@@ -167,35 +264,56 @@ class AdaGradOscarOptimizer {
     // sanity checking guard so that we know we've assigned all weights
     // (in case groups somehow became malformed)
     const double GUARD_VALUE = -std::numeric_limits<double>::infinity();
-    for (size_t i = 0; i < _N; i++) {
+    for (size_t i = 0; i < _oscar_feat_count; i++) {
       (*z)[i] = GUARD_VALUE;
     }
     
+    // at this point, we have determined how many groups (degrees of freedom)
+    // we will have. we just need to assign a weight to each group.
     int iGroup = 0;
     int num_active = 0;
     int num_dof = 0;
     while (!stack.empty()) {
       const OscarGroup& group = *stack.top();
       stack.pop();
-      double common_weight = ComputeCommonValue(a, group);
+      // don't include the L_inf penalty when computing the weight --
+      // it can be very harsh. it's useful for bringing weights close together for clustering,
+      // but not so relevant to the final weight (especially the polarity of the final weight)
+      double common_weight = ComputeCommonValue(a, group, false);
       
       if (_verbose) cerr << "Group_" << iGroup << ": " << common_weight << " Size: " << group.Size() << endl;
       for (size_t idx : group._orig_indices) {
 	(*z)[idx] = common_weight;
       }
 
+      // now that we've computed the common feature weight for all features in this group,
+      // tally its impact on active feature count and degrees of freedom
       if (common_weight != 0)
       {
         num_active += group.Size();
-        num_dof++;
+        ++num_dof;
       }
         
-      iGroup++;
+      ++iGroup;
     }
-    cerr << "FastOSCAR: Active features: " << num_active << " Degrees of freedom: " << num_dof << endl;
+
+    // now add in non-OSCAR features
+    int all_active = num_active;
+    int all_dof = num_dof;
+    for (size_t i = 0; i < _N; ++i) {
+      if (!_oscar_feats.at(i) && pre_proximal_weights.at(i) != 0.0) {
+	++all_active;
+	++all_dof;
+      }
+    }
+    cerr << "FastOSCAR: OSCAR active features: " << num_active
+	 << " OSCAR degrees of freedom: " << num_dof
+	 << " Total active features: " << all_active
+	 << " Total degrees of freedom: " << all_dof
+	 << endl;
     
     // sanity check for post condition that all z's should have been set
-    for (size_t i = 0; i < _N; i++) {
+    for (size_t i = 0; i < _oscar_feat_count; i++) {
       assert(z->at(i) != GUARD_VALUE);
       assert(std::isfinite(z->at(i)));
     }
@@ -203,14 +321,17 @@ class AdaGradOscarOptimizer {
 
   const double _C1;
   const double _C_inf;
+  const bool _use_Linf_in_weights;
   const double _init_learning_rate;
   const double _nonadapted_learning_rate;
   const int _buffer_size;
   const int _iterations;
   const size_t _N;
+  size_t _oscar_feat_count;
   vector<double> _prev_weights;
   vector<bool> _oscar_feats;
   const bool _verbose;
+  const bool _debug_proximal_step;
 
   vector<double> _G;   // running sum (over iterations) of unnormalized gradient squares
   
@@ -236,6 +357,7 @@ class AdaGradOscarOptimizer {
   AdaGradOscarOptimizer(
     const double C1, // constant for L1 regularizer
     const double C_inf, // constant for pairwise L_inf regularizer
+    const bool use_Linf_in_weights, // use Linf penalty for computing weight values? (false means use it only for grouping purposes; recommended: true)
     const double init_learning_rate,
     const double nonadapted_learning_rate,
     const int buffer_size, // number of historical gradients to consider when adapting the learning rate (use -1 for standard adagrad)
@@ -245,6 +367,7 @@ class AdaGradOscarOptimizer {
     const bool verbose)
    : _C1(C1),
      _C_inf(C_inf),
+     _use_Linf_in_weights(use_Linf_in_weights),
      _init_learning_rate(init_learning_rate),
      _nonadapted_learning_rate(nonadapted_learning_rate),
      _buffer_size(buffer_size),
@@ -253,11 +376,14 @@ class AdaGradOscarOptimizer {
      _prev_weights(init_weights),
      _oscar_feats(oscar_feats),
      _verbose(verbose),
+     _debug_proximal_step(verbose),
+
+    _oscar_feat_count(std::count_if(oscar_feats.begin(), oscar_feats.end(), [](const bool b) { return b == true; })),
 
      // initialize non-parameters
      _G(_N, 0.0),
-     _a(_N, 0.0),
-     _z(_N, 0.0),
+     _a(_oscar_feat_count, 0.0),
+     _z(_oscar_feat_count, 0.0),
      _pre_proximal_weights(_N, 0.0),
      _cur_iteration(0)
    {
@@ -267,6 +393,8 @@ class AdaGradOscarOptimizer {
      assert(_nonadapted_learning_rate >= 0.0);
      assert(_buffer_size >= -1);
      assert(_iterations >= 0);
+     assert(_oscar_feats.size() >= _N);
+     cerr << "Initialized a new adagrad optimizer instance with " << _oscar_feat_count << " OSCAR feats" << endl;
    }
 
   // TODO: The gradient here could be a sparse vector
@@ -327,7 +455,7 @@ class AdaGradOscarOptimizer {
    }
    
    OscarPrepareProximalInputs(_pre_proximal_weights, &_a);
-   OscarProximalStep(_a, &_z);   
+   OscarProximalStep(_pre_proximal_weights, _a, &_z);   
    OscarWeightsFromProximalSolution(_z, _pre_proximal_weights, updated_weights);
 
    if (_verbose) {
