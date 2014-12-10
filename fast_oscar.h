@@ -7,8 +7,6 @@
 #include <cmath>
 #include <algorithm>
 
-#include <boost/timer/timer.hpp>
-
 using namespace std;
 
 //namespace fast_oscar {
