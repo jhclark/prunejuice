@@ -7,6 +7,8 @@
 #include <cmath>
 #include <algorithm>
 
+#include <boost/timer/timer.hpp>
+
 using namespace std;
 
 //namespace fast_oscar {
@@ -19,19 +21,121 @@ template <typename T> int sgn(T val) {
 
 struct OscarGroup {
   vector<size_t> _orig_indices;
-  vector<size_t> _sorted_indices;
   double _init_value;
 
+  // separate the numerator into contributions from categories:
+  // * a (the absolute value of the pre-proximal weight)
+  // * L1 (the contributions from the L1 regularizer)
+  // * Linf (the contributions from the Linf regularizer)
+  double _numerator_a;
+  double _numerator_L1;
+  double _numerator_Linf;
+
+  double _a_contrib;
+  double _L1_contrib;
+  double _Linf_contrib;
+
+  size_t _n;
+
+  OscarGroup() {
+    _numerator_a = 0.0;
+    _numerator_L1 = 0.0;
+    _numerator_Linf = 0.0;
+
+    _a_contrib = 0.0;
+    _L1_contrib = 0.0;
+    _Linf_contrib = 0.0;
+    _n = 0;
+  }
+
   size_t Size() const {
-    assert(_orig_indices.size() == _sorted_indices.size());
-    return _orig_indices.size();
+    assert(_orig_indices.size() == _n);
+    return _n;
+  }
+
+  // initialize with a single point
+  void Init(size_t orig_idx, double init_value, double C1) {
+    _orig_indices.push_back(orig_idx);
+    _init_value = init_value; // a.at(orig_idx)
+    _n = 1;
+    
+    _numerator_a = init_value;
+    _numerator_L1 = -C1;
+
+    // this begins equal to the numerator since we divide by one
+    _a_contrib = _numerator_a;
+    _L1_contrib = _numerator_L1;
+  }
+  void SetSortedIndex(size_t sorted_idx, size_t oscar_feat_count, double C_inf) {
+    _numerator_Linf = -ComputeW_inf(sorted_idx, oscar_feat_count, C_inf);
+
+    // this begins equal to the numerator since we divide by one
+    _Linf_contrib = _numerator_Linf;
   }
 
   void MergeWith(OscarGroup& that) {
-    assert(_orig_indices.size() == _sorted_indices.size());
-    _orig_indices.insert(_orig_indices.begin(), that._orig_indices.begin(), that._orig_indices.end());
-    _sorted_indices.insert(_sorted_indices.begin(), that._sorted_indices.begin(), that._sorted_indices.end());
+    // TODO: Can we get away without these altogether?
+    _orig_indices.insert(_orig_indices.end(), that._orig_indices.begin(), that._orig_indices.end());
+    _n += that._n;
+
+    _numerator_a += that._numerator_a;
+    _numerator_L1 += that._numerator_L1;
+    _numerator_Linf += that._numerator_Linf;
+    assert(std::isfinite(_numerator_a));
+    assert(std::isfinite(_numerator_L1));
+    assert(std::isfinite(_numerator_Linf));
+
+    _a_contrib = _numerator_a / _n;
+    _L1_contrib = _numerator_L1 / _n;
+    _Linf_contrib = _numerator_Linf / _n;
+
+    assert(_orig_indices.size() == _n);
   }
+  
+  void Clear() {
+    _orig_indices.resize(0);
+    _orig_indices.shrink_to_fit();
+    _n = 0;
+  }
+
+  // w: Measures contribution of the L_inf regularizer
+  // used for determining an actual or hypothetical common parameter value within a group
+  // i is the index of interest **in the sorted list** of a's
+  // (see text just below Eq 13)
+  inline double ComputeW_inf(const size_t i,
+                             const size_t oscar_feat_count,
+                             const double C_inf) const {
+    assert(i < oscar_feat_count);
+    //const double C1, // constant for L1 regularizer
+    //const double C_inf, // constant for pairwise L_inf regularizer
+    //const size_t N, // dimensionality / feature count
+    return C_inf * (oscar_feat_count - i);
+  }
+
+  // compute the common value for a group or proposed group
+  // equation (15)
+  // optionally return individual contributions from regularizers and pre-proximal weight mass for debuggging
+  double ComputeCommonValue(const bool include_Linf) { // include Linf in returned value? this allows us to use it for grouping, but not for final weight value calculation
+
+    // clip: [v]_+ (only include L1)
+    double clipped = std::max(_a_contrib + _L1_contrib, 0.0);
+    assert(std::isfinite(clipped));
+    double common_value;
+    if (clipped == 0.0) {
+      common_value = 0.0;
+    } else {
+      // if we survived clipping via L1, allow Linf to change our ranking, but
+      // not clip us (this gives a non-octagonal regularizer, but that's okay)
+      if (include_Linf) {
+        common_value = clipped + _Linf_contrib;
+        assert(std::isfinite(common_value));
+      } else {
+        common_value = clipped;
+      }
+    }
+    return common_value;
+  }
+
 };
 
 // combines the proximal function defined by Zhong & Kwok 2012's algorithm 2
@@ -101,85 +205,6 @@ class AdaGradOscarOptimizer {
     assert(j == z.size());
   }
 
-  // w: Measures contribution of the L_inf regularizer
-  // used for determining an actual or hypothetical common parameter value within a group
-  // i is the index of interest **in the sorted list** of a's
-  // (see text just below Eq 13)
-  double ComputeW_inf(const size_t i) const {
-    assert(i < _oscar_feat_count);
-    //const double C1, // constant for L1 regularizer
-    //const double C_inf, // constant for pairwise L_inf regularizer
-    //const size_t N, // dimensionality / feature count
-    return _C_inf * (_oscar_feat_count - i);
-  }
-
-  // compute the common value for a group or proposed group
-  // equation (15)
-  // optionally return individual contributions from regularizers and pre-proximal weight mass for debuggging
-  double ComputeCommonValue(const vector<double>& a,
-                            const OscarGroup& group,
-                            const bool include_Linf, // include Linf in returned value? this allows us to use it for grouping, but not for final weight value calculation
-                            double* a_contrib_out = nullptr,
-                            double* L1_contrib_out = nullptr,
-                            double* Linf_contrib_out = nullptr) const {
-    assert(a.size() == _oscar_feat_count);
-    assert(_oscar_feat_count <= _N);
-
-    //const double C1, // constant for L1 regularizer
-    //const double C_inf, // constant for pairwise L_inf regularizer
-    //const size_t N, // dimensionality / feature count
-
-    // separate the numerator into contributions from two categories:
-    // * a (the absolute value of the pre-proximal weight)
-    // * L1 (the contributions from the L1 regularizer)
-    // * Linf (the contributions from the Linf regularizer)
-    double numerator_a = 0.0;
-    double numerator_L1 = 0.0;
-    double numerator_Linf = 0.0;
-    for (size_t k = 0; k < group._sorted_indices.size(); k++) {
-      size_t orig_idx = group._orig_indices.at(k); // for accessing a's, etc.
-      size_t sorted_idx = group._sorted_indices.at(k); // for determining impact under pairwise L_inf regularizer
-      assert(orig_idx < _oscar_feat_count);
-      assert(sorted_idx < _oscar_feat_count);
-      numerator_a += a.at(orig_idx);
-      numerator_L1 -= _C1;
-      numerator_Linf -= ComputeW_inf(sorted_idx);
-      assert(std::isfinite(numerator_a));
-      assert(std::isfinite(numerator_L1));
-      assert(std::isfinite(numerator_Linf));
-    }
-
-    double a_contrib = numerator_a / group.Size();
-    double L1_contrib = numerator_L1 / group.Size();
-    double Linf_contrib = numerator_Linf / group.Size();
-
-    // return debug values
-    if (a_contrib_out != nullptr) *a_contrib_out = a_contrib;
-    if (L1_contrib_out != nullptr) *L1_contrib_out = L1_contrib;
-    if (Linf_contrib_out != nullptr) *Linf_contrib_out = Linf_contrib;
-
-    //double v = a_contrib + L1_contrib + Linf_contrib;
-    //double result = std::max(v, 0.0;
-    //assert(std::isfinite(v));
-
-    // clip: [v]_+ (only include L1)
-    double clipped = std::max(a_contrib + L1_contrib, 0.0);
-    assert(std::isfinite(clipped));
-    if (clipped == 0.0) {
-      return 0.0;
-    } else {
-      // if we survived clipping via L1, allow Linf to change our ranking, but
-      // not clip us (this gives a non-octagonal regularizer, but that's okay)
-      if (include_Linf) {
-        double result = clipped + Linf_contrib;
-        assert(std::isfinite(result));
-        return result;
-      } else {
-        return clipped;
-      }
-    }
-  }
-
   // NOTE: Gradient includes all smooth terms (typically just the loss only),
   // and not the non-smooth regularizers (e.g. L1 and OSCAR),
   // but it could include smooth structured regularizers, etc.
@@ -201,8 +226,7 @@ class AdaGradOscarOptimizer {
     vector<OscarGroup> groups;
     groups.resize(_oscar_feat_count);
     for (size_t i = 0; i < _oscar_feat_count; i++) {
-      groups[i]._orig_indices.push_back(i);
-      groups[i]._init_value = a.at(i);
+      groups[i].Init(i, a.at(i), _C1);
     }
 
     // alg2, line 1: sort in decreasing order
@@ -210,7 +234,7 @@ class AdaGradOscarOptimizer {
 	      [](const OscarGroup& a, const OscarGroup& b) { return a._init_value > b._init_value; });
     
     for (size_t i = 0; i < _oscar_feat_count; i++) {
-      groups[i]._sorted_indices.push_back(i);
+      groups[i].SetSortedIndex(i, _oscar_feat_count, _C_inf);
     }
 
     // alg2, line 5:  initialize the stack
@@ -219,36 +243,26 @@ class AdaGradOscarOptimizer {
     stack.push(&groups.at(0));
 
     // in this outer loop, we determine how many groups we will have
+    assert(_oscar_feat_count <= _N);
     for (size_t i = 1; i < _oscar_feat_count; i++) {
       OscarGroup& cur_group = groups.at(i);
       bool done_with_group = false;
       while (!stack.empty() && !done_with_group) {
         OscarGroup& next_group = *stack.top();
-        double cur_common_value = ComputeCommonValue(a, cur_group, true);
-        double next_common_value = ComputeCommonValue(a, next_group, true);
-        if (cur_common_value >= next_common_value) {
-          cur_group.MergeWith(next_group);
-          stack.pop(); // pop off next_group aka stack.top()
-          // merge and continue looking for merges with this group
-        } else {
-          // don't merge and stop looking for merges with this group
-          done_with_group = true;
-        }
+        double cur_common_value = cur_group.ComputeCommonValue(true);
+        double next_common_value = next_group.ComputeCommonValue(true);
 
         if (_debug_proximal_step) {
-          double cur_a_contrib, cur_L1_contrib, cur_Linf_contrib;
-          double next_a_contrib, next_L1_contrib, next_Linf_contrib;
-          cur_common_value = ComputeCommonValue(a, cur_group, true, &cur_a_contrib, &cur_L1_contrib, &cur_Linf_contrib);
-          next_common_value = ComputeCommonValue(a, next_group, true, &next_a_contrib, &next_L1_contrib, &next_Linf_contrib);
-          double delta_Linf_contrib = next_Linf_contrib - cur_Linf_contrib;
           cerr << "i=" << i << "; ";
           if (cur_common_value >= next_common_value) {
             cerr << "MERGED ";
           } else {
             cerr << "NOT MERGED ";
           }
-          cerr << "cur_group " << cur_common_value << " (a=" << cur_a_contrib << "; L1=" << cur_L1_contrib << "; Linf=" << cur_Linf_contrib << ") "
-               << "with (>=?) next_group " << next_common_value << " (a=" << next_a_contrib << "; L1=" << next_L1_contrib << "; Linf=" << next_Linf_contrib << ") "
+
+          double delta_Linf_contrib = next_group._Linf_contrib - cur_group._Linf_contrib;
+          cerr << "cur_group " << cur_common_value << " (a=" << cur_group._a_contrib << "; L1=" << cur_group._L1_contrib << "; Linf=" << cur_group._Linf_contrib << ") "
+               << "with (>=?) next_group " << next_common_value << " (a=" << next_group._a_contrib << "; L1=" << next_group._L1_contrib << "; Linf=" << next_group._Linf_contrib << ") "
                << " -- delta Linf_contrib: " << delta_Linf_contrib
                << " -- group size: " << cur_group.Size();
           if (done_with_group) {
@@ -256,6 +270,16 @@ class AdaGradOscarOptimizer {
           } else {
             cerr << " (CONTINUE with group)" << endl;
           }
+        }
+
+        if (cur_common_value >= next_common_value) {
+          cur_group.MergeWith(next_group);
+          next_group.Clear();
+          stack.pop(); // pop off next_group aka stack.top()
+          // merge and continue looking for merges with this group
+        } else {
+          // don't merge and stop looking for merges with this group
+          done_with_group = true;
         }
       }
       stack.push(&cur_group);
@@ -274,12 +298,12 @@ class AdaGradOscarOptimizer {
     int num_active = 0;
     int num_dof = 0;
     while (!stack.empty()) {
-      const OscarGroup& group = *stack.top();
+      OscarGroup& group = *stack.top();
       stack.pop();
       // don't include the L_inf penalty when computing the weight --
       // it can be very harsh. it's useful for bringing weights close together for clustering,
       // but not so relevant to the final weight (especially the polarity of the final weight)
-      double common_weight = ComputeCommonValue(a, group, false);
+      double common_weight = group.ComputeCommonValue(false);
       
       if (_verbose) cerr << "Group_" << iGroup << ": " << common_weight << " Size: " << group.Size() << endl;
       for (size_t idx : group._orig_indices) {
