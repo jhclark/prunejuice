@@ -18,7 +18,8 @@ template <typename T> int sgn(T val) {
 }
 
 struct OscarGroup {
-  vector<size_t> _orig_indices;
+  size_t _orig_idx;
+  size_t _sorted_idx;
   double _init_value;
 
   // separate the numerator into contributions from categories:
@@ -47,13 +48,12 @@ struct OscarGroup {
   }
 
   size_t Size() const {
-    assert(_orig_indices.size() == _n);
     return _n;
   }
 
   // initialize with a single point
   void Init(size_t orig_idx, double init_value, double C1) {
-    _orig_indices.push_back(orig_idx);
+    _orig_idx = orig_idx;
     _init_value = init_value; // a.at(orig_idx)
     _n = 1;
     
@@ -65,6 +65,7 @@ struct OscarGroup {
     _L1_contrib = _numerator_L1;
   }
   void SetSortedIndex(size_t sorted_idx, size_t oscar_feat_count, double C_inf) {
+    _sorted_idx = sorted_idx;
     _numerator_Linf = -ComputeW_inf(sorted_idx, oscar_feat_count, C_inf);
 
     // this begins equal to the numerator since we divide by one
@@ -73,7 +74,6 @@ struct OscarGroup {
 
   void MergeWith(OscarGroup& that) {
     // TODO: Can we get away without these altogether?
-    _orig_indices.insert(_orig_indices.end(), that._orig_indices.begin(), that._orig_indices.end());
     _n += that._n;
 
     _numerator_a += that._numerator_a;
@@ -86,13 +86,9 @@ struct OscarGroup {
     _a_contrib = _numerator_a / _n;
     _L1_contrib = _numerator_L1 / _n;
     _Linf_contrib = _numerator_Linf / _n;
-
-    assert(_orig_indices.size() == _n);
   }
   
   void Clear() {
-    _orig_indices.resize(0);
-    _orig_indices.shrink_to_fit();
     _n = 0;
   }
 
@@ -218,20 +214,32 @@ class AdaGradOscarOptimizer {
     assert(z->size() == _oscar_feat_count);
     assert(_oscar_feat_count <= _N);
 
+    std::cerr << "FastOSCAR: INIT ";
+
     // alg2, line 2: initialize groups
     // home for all groups -- destroyed via scope
     // these groups will be mutated over the life of the function
     vector<OscarGroup> groups;
     groups.resize(_oscar_feat_count);
-    for (size_t i = 0; i < _oscar_feat_count; i++) {
+    for (size_t i = 0; i < _oscar_feat_count; ++i) {
       groups[i].Init(i, a.at(i), _C1);
     }
 
     // alg2, line 1: sort in decreasing order
+    std::cerr << "SORT ";
     std::sort(groups.begin(), groups.end(),
 	      [](const OscarGroup& a, const OscarGroup& b) { return a._init_value > b._init_value; });
-    
-    for (size_t i = 0; i < _oscar_feat_count; i++) {
+
+    // create a mapping between sorted feature indices and original indices
+    // so that we don't need to keep any intermediate vectors
+    // we'll keep a start and end index into the sorted array in each group
+    std::cerr << "MAP ";
+    vector<size_t> sorted_idx_to_orig_idx;
+    sorted_idx_to_orig_idx.resize(_oscar_feat_count);
+
+    for (size_t i = 0; i < _oscar_feat_count; ++i) {
+      sorted_idx_to_orig_idx[i] = groups[i]._orig_idx;
+
       groups[i].SetSortedIndex(i, _oscar_feat_count, _C_inf);
     }
 
@@ -241,6 +249,7 @@ class AdaGradOscarOptimizer {
     stack.push(&groups.at(0));
 
     // in this outer loop, we determine how many groups we will have
+    std::cerr << "GROUPING ";
     assert(_oscar_feat_count <= _N);
     for (size_t i = 1; i < _oscar_feat_count; i++) {
       OscarGroup& cur_group = groups.at(i);
@@ -292,6 +301,7 @@ class AdaGradOscarOptimizer {
     
     // at this point, we have determined how many groups (degrees of freedom)
     // we will have. we just need to assign a weight to each group.
+    std::cerr << "WEIGHTING ";
     int iGroup = 0;
     int num_active = 0;
     int num_dof = 0;
@@ -304,8 +314,10 @@ class AdaGradOscarOptimizer {
       double common_weight = group.ComputeCommonValue(false);
       
       if (_verbose) cerr << "Group_" << iGroup << ": " << common_weight << " Size: " << group.Size() << endl;
-      for (size_t idx : group._orig_indices) {
-	(*z)[idx] = common_weight;
+      for (size_t i = 0; i < group._n; ++i) {
+        size_t sorted_idx = group._sorted_idx - i;
+        size_t orig_idx = sorted_idx_to_orig_idx.at(sorted_idx);
+	(*z)[orig_idx] = common_weight;
       }
 
       // now that we've computed the common feature weight for all features in this group,
@@ -318,6 +330,8 @@ class AdaGradOscarOptimizer {
         
       ++iGroup;
     }
+
+    std::cerr << "DONE" << std::endl;
 
     // now add in non-OSCAR features
     int all_active = num_active;
