@@ -9,6 +9,10 @@ The only dependency is the STL and C++11.
 
 This is a fairly rough crack at it right now. Currently, it just uses dense vectors to avoid additional dependencies. If you're working with very large feature sets (1M+ features), it should only be ~1 hour of work to ensparsen the vectors.
 
+What's with the name?
+=====================
+
+This library helps keep your parameters regular. You get the idea.
 
 Using
 =====
